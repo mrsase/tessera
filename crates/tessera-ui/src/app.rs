@@ -338,7 +338,16 @@ impl TerminalApp {
         };
 
         match ks.key.as_str() {
-            "enter" => self.input.enter(),
+            "enter" => {
+                if self.input.is_valid() {
+                    let command = self.input.text().trim().to_string();
+                    if !command.is_empty() {
+                        let cwd = self.term(pane).and_then(|t| t.cwd()).map(PathBuf::from);
+                        self.history.record(&command, cwd.as_deref(), unix_now());
+                    }
+                }
+                self.input.enter();
+            }
             "backspace" if plain => self.input.backspace(),
             "up" | "down" | "left" | "right" | "home" | "end" | "tab" | "delete" | "pageup"
             | "pagedown" | "insert" => self.input.invalidate(),
