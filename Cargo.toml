@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/tessera-term", "crates/tessera-core", "crates/tessera-ui"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/tessera-term/tessera"
+authors = ["Tessera contributors"]
+
+[workspace.dependencies]
+tessera-term = { path = "crates/tessera-term" }
+tessera-core = { path = "crates/tessera-core" }
+vte = "0.15"
+unicode-width = "0.2"
+portable-pty = "0.9"
+async-channel = "2"
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,17 @@
+[package]
+name = "tessera-ui"
+description = "GPUI front end for Tessera"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tessera"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+tessera-core.workspace = true
+tessera-term.workspace = true
+anyhow.workspace = true

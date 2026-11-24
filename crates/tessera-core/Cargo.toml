@@ -1,0 +1,16 @@
+[package]
+name = "tessera-core"
+description = "Sessions, tabs, panes, tmux integration and history suggestions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tessera-term.workspace = true
+portable-pty.workspace = true
+async-channel.workspace = true
+serde.workspace = true
+toml.workspace = true
+dirs.workspace = true
+thiserror.workspace = true

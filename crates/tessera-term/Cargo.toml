@@ -1,0 +1,11 @@
+[package]
+name = "tessera-term"
+description = "VT emulation core for Tessera: parser, grid, scrollback"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+vte.workspace = true
+unicode-width.workspace = true
