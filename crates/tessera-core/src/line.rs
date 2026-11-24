@@ -121,7 +121,7 @@ impl InputLine {
             .find(|(_, ch)| ch.is_whitespace() || *ch == '/' || *ch == '-')
             .map(|(i, _)| i)
             .unwrap_or(suffix.len());
-        let bytes = suffix[..take].as_bytes().to_vec();
+        let bytes = suffix.as_bytes()[..take].to_vec();
         self.text.push_str(&suffix[..take]);
         Some(bytes)
     }

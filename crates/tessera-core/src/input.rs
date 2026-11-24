@@ -59,10 +59,6 @@ impl Mods {
     fn param(self) -> u8 {
         1 + u8::from(self.shift) + 2 * u8::from(self.alt) + 4 * u8::from(self.ctrl)
     }
-
-    fn any(self) -> bool {
-        self.shift || self.alt || self.ctrl
-    }
 }
 
 impl fmt::Display for Mods {

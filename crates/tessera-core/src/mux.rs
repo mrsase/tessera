@@ -260,6 +260,35 @@ pub enum MuxEvent {
     Exit,
 }
 
+use std::path::Path;
+use tessera_term::Term;
+
+/// Every session backend implements this. The UI owns exactly one `Box<dyn Mux>`.
+///
+/// Threading: reader threads only enqueue bytes and poke the wake channel;
+/// `poll()` drains queues and mutates `Term`s on the caller's thread.
+pub trait Mux {
+    fn snapshot(&self) -> Snapshot;
+    fn term(&self, pane: PaneId) -> Option<&Term>;
+    /// Drain backend queues; returns what changed.
+    fn poll(&mut self) -> Vec<MuxEvent>;
+    /// Notification channel: a value is sent whenever `poll()` has work.
+    fn wake(&self) -> async_channel::Receiver<()>;
+    fn write(&mut self, pane: PaneId, bytes: &[u8]);
+    /// Client area in cells; reassigns width/height to every visible pane.
+    fn resize_client(&mut self, cols: usize, rows: usize);
+    fn new_tab(&mut self, cwd: Option<&Path>);
+    fn close_tab(&mut self, tab: u64);
+    fn select_tab(&mut self, tab: u64);
+    fn split(&mut self, pane: PaneId, dir: SplitDir) -> Option<PaneId>;
+    fn close_pane(&mut self, pane: PaneId);
+    fn focus_pane(&mut self, pane: PaneId);
+    /// Set a split's ratio; `path` walks the layout (false = first child).
+    fn set_split_ratio(&mut self, tab: u64, path: &[bool], ratio: f32);
+    /// Ask the backend to stop. Called on app quit; tmux detaches, native kills.
+    fn shutdown(&mut self);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,33 +376,4 @@ mod tests {
         assert_eq!(sizes.len(), 2);
         assert!(sizes.iter().all(|(_, w, h)| *w >= 1 && *h >= 1));
     }
-}
-
-use std::path::Path;
-use tessera_term::Term;
-
-/// Every session backend implements this. The UI owns exactly one `Box<dyn Mux>`.
-///
-/// Threading: reader threads only enqueue bytes and poke the wake channel;
-/// `poll()` drains queues and mutates `Term`s on the caller's thread.
-pub trait Mux {
-    fn snapshot(&self) -> Snapshot;
-    fn term(&self, pane: PaneId) -> Option<&Term>;
-    /// Drain backend queues; returns what changed.
-    fn poll(&mut self) -> Vec<MuxEvent>;
-    /// Notification channel: a value is sent whenever `poll()` has work.
-    fn wake(&self) -> async_channel::Receiver<()>;
-    fn write(&mut self, pane: PaneId, bytes: &[u8]);
-    /// Client area in cells; reassigns width/height to every visible pane.
-    fn resize_client(&mut self, cols: usize, rows: usize);
-    fn new_tab(&mut self, cwd: Option<&Path>);
-    fn close_tab(&mut self, tab: u64);
-    fn select_tab(&mut self, tab: u64);
-    fn split(&mut self, pane: PaneId, dir: SplitDir) -> Option<PaneId>;
-    fn close_pane(&mut self, pane: PaneId);
-    fn focus_pane(&mut self, pane: PaneId);
-    /// Set a split's ratio; `path` walks the layout (false = first child).
-    fn set_split_ratio(&mut self, tab: u64, path: &[bool], ratio: f32);
-    /// Ask the backend to stop. Called on app quit; tmux detaches, native kills.
-    fn shutdown(&mut self);
 }

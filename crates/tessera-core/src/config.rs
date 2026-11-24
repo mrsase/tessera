@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(cfg.shell.as_deref(), Some("/bin/zsh"));
         assert_eq!(cfg.theme.background, "#000000");
         assert_eq!(cfg.theme.foreground, Theme::default().foreground);
-        assert_eq!(cfg.history_suggestions, true);
+        assert!(cfg.history_suggestions);
     }
 
     #[test]
