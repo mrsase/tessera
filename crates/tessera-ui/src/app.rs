@@ -139,7 +139,15 @@ impl TerminalApp {
         };
 
         app.measure(window, cx);
-        app.spawn_backend(window, cx);
+        // Start the backend after the first frame is on screen: a backend that
+        // becomes ready before GPUI presents its first frame can leave the
+        // window black until the compositor sends a resize (observed on X11).
+        cx.on_next_frame(window, |app, window, cx| {
+            if app.mux.is_none() && app.error.is_none() {
+                app.spawn_backend(window, cx);
+                cx.notify();
+            }
+        });
         app.focus.focus(window);
 
         let blink = cx.spawn(
@@ -896,10 +904,9 @@ impl TerminalApp {
 
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(mux) = &self.mux else {
-            let message = self
-                .error
-                .clone()
-                .unwrap_or_else(|| "no session backend available".into());
+            let Some(message) = self.error.clone() else {
+                return div().size_full().into_any_element();
+            };
             return div()
                 .size_full()
                 .flex()
