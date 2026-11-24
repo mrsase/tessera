@@ -146,15 +146,23 @@ where it is, and appends executed commands to the JSONL history.
   app shortcuts intercepted first (see `docs/keys.md`).
 - PTY wake-ups are delivered by an `async_channel` receiver polled from a GPUI
   async task; the task calls `cx.notify()` and never blocks the UI thread.
+- The command palette (`Ctrl+Shift+P`), scrollback search (`Ctrl+Shift+F`) and
+  tab rename (`F2`) are one overlay state machine: filter entries by a
+  subsequence match, navigate with the keyboard, activate with click or Enter.
+  Search results are absolute line indices, so jumping reuses the same
+  scrollback offset as wheel paging.
+- Only the active pane draws a cursor and ghost suggestion. Any focus change,
+  split, tab switch or non-text key invalidates the tracked input line; the
+  suggestion engine never guesses what it cannot see.
 
 ## Platform matrix
 
 | Target | Core crates | UI | Notes |
 |---|---|---|---|
-| Linux x86_64/aarch64 | yes | yes | X11/Wayland, Vulkan via `blade`; lavapipe works |
-| macOS arm64/x86_64 | yes | yes | Metal |
-| Windows x86_64/aarch64 | yes | yes | ConPTY through `portable-pty` |
-| Android | yes (tested for compile) | no | GPUI has no Android backend; no promises |
+| Linux x86_64/aarch64 | yes | yes, verified | X11/Wayland, Vulkan via `blade`; verified on WSLg/X11 with lavapipe |
+| macOS arm64/x86_64 | yes | builds in CI | Metal; not runtime-verified by this project yet |
+| Windows x86_64 | yes (ConPTY) | builds in CI | GPUI Windows backend; not runtime-verified here |
+| Android | core crates are portable | no | GPUI has no Android backend; no promises |
 
 ## Risks and mitigations
 
@@ -166,3 +174,28 @@ where it is, and appends executed commands to the JSONL history.
   any non-text input; never accept a suggestion the user did not see.
 - **Software Vulkan is slow.** Compact damage-free painting: rows are shaped
   once per frame, quads only for non-default backgrounds.
+
+## Implementation notes (v0.1)
+
+- **Geometry is the single source of truth.** `Layout::rects(cols, rows)` produces
+  pane rectangles in cells; the UI multiplies by the measured cell size. The same
+  rectangles feed paint, hit-testing and PTY resize, so a click maps to the cell
+  the user sees even after a split or font change.
+- **Paint cost is bounded by rows, not cells.** Each visible row is shaped once
+  with GPUI's line-layout cache; only non-default backgrounds, selection spans,
+  the cursor and the ghost line become quads. Blink is a 530 ms timer that
+  notifies the view rather than a polling loop.
+- **tmux replay is deliberate.** Before spawning the control client Tessera
+  checks `has-session`. A session it created is never replayed (a blank capture
+  would move the cursor to the bottom); a session it attaches to is replayed once
+  per pane with trailing blank rows trimmed, then live `%output` continues in
+  order. Panes created by the client itself are marked replayed.
+- **Dependency caveats.** GPUI 0.2.2 pulls an HTTP client whose `xattr` 0.2.3
+  dependency no longer compiles against current libc on Linux; the workspace
+  patches a one-line `ENOATTR` → `ENODATA` fix from `vendor/xattr` (documented in
+  `vendor/README.md`). The `async-compression` crate download was blocked by this
+  network; for local development only, a user-level Cargo `paths` override points
+  at an extracted copy. Neither workaround changes the source of Tessera.
+- **No app-level event loop coupling.** `tessera-core` knows nothing about GPUI;
+  it exposes a `Mux` trait plus an `async_channel` wake signal. The UI layer is
+  replaceable by a different front end without touching emulation or sessions.
