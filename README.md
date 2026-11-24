@@ -1,5 +1,7 @@
 # Tessera
 
+[![CI](https://github.com/mrsase/tessera/actions/workflows/ci.yml/badge.svg)](https://github.com/mrsase/tessera/actions/workflows/ci.yml)
+
 A GPU-accelerated terminal **workspace** written in Rust, built on [GPUI](https://gpui.rs)
 (Zed's UI framework): tabs, native split panes, an optional tmux backend for
 persistent sessions, and inline history suggestions.
