@@ -127,6 +127,7 @@ impl RenderData {
         metrics: &Metrics,
         cursor_on: bool,
         ghost: Option<(usize, usize, &str)>,
+        active: bool,
     ) -> Self {
         let history = term.history_len();
         let offset = offset.min(history);
@@ -140,7 +141,7 @@ impl RenderData {
             out_rows.push(build_row(row, cols, line, selection, theme));
         }
 
-        let cursor = if hide_cursor {
+        let cursor = if hide_cursor || !active {
             None
         } else {
             let c = term.screen().cursor;
@@ -258,7 +259,7 @@ struct Prepared {
     cursor: Option<PaintQuad>,
 }
 
-fn text_runs(row: &RowData, family: &SharedString, font_size: Pixels) -> Vec<TextRun> {
+fn text_runs(row: &RowData, family: &SharedString) -> Vec<TextRun> {
     row.runs
         .iter()
         .map(|run| TextRun {
@@ -295,8 +296,6 @@ fn text_runs(row: &RowData, family: &SharedString, font_size: Pixels) -> Vec<Tex
 /// A `canvas` element plus the shared data needed by its two phases.
 pub fn visual(data: Rc<RenderData>) -> impl gpui::IntoElement {
     let prepaint_data = data.clone();
-    let font_size = px(data.metrics.font_size);
-    let _ = font_size;
     canvas(
         move |bounds, window, _cx| {
             let font_size = px(prepaint_data.metrics.font_size);
@@ -310,7 +309,7 @@ pub fn visual(data: Rc<RenderData>) -> impl gpui::IntoElement {
                 cursor: None,
             };
             for (row_idx, row) in prepaint_data.rows.iter().enumerate() {
-                let runs = text_runs(row, &m.family, font_size);
+                let runs = text_runs(row, &m.family);
                 if runs.is_empty() {
                     continue;
                 }
@@ -418,18 +417,4 @@ pub fn hit_cell(
     let col = (x / metrics.cell_w) as usize;
     let row = (y / metrics.cell_h) as usize;
     (col < cols && row < rows).then_some((col, row))
-}
-
-/// Bounds of one cell inside a pane, for overlay UI.
-pub fn cell_bounds(
-    bounds: Bounds<Pixels>,
-    metrics: &Metrics,
-    col: usize,
-    row: usize,
-) -> Bounds<Pixels> {
-    let origin = point(
-        bounds.left() + px(PADDING + col as f32 * metrics.cell_w),
-        bounds.top() + px(PADDING + row as f32 * metrics.cell_h),
-    );
-    Bounds::new(origin, size(px(metrics.cell_w), px(metrics.cell_h)))
 }

@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gpui::prelude::*;
 use gpui::{
     div, font, point, px, rgb, rgba, size, AnyElement, Bounds, ClipboardItem, Context, ElementId,
-    FocusHandle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    FocusHandle, IntoElement, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Subscription,
     Task, WeakEntity, Window,
 };
@@ -35,6 +35,33 @@ pub fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaletteMode {
+    Commands,
+    Search,
+    Rename,
+}
+
+#[derive(Clone)]
+enum EntryKind {
+    Do(Action),
+    Jump(usize),
+}
+
+#[derive(Clone)]
+struct PaletteEntry {
+    label: String,
+    detail: String,
+    kind: EntryKind,
+}
+
+struct Palette {
+    mode: PaletteMode,
+    query: String,
+    selected: usize,
+    entries: Vec<PaletteEntry>,
 }
 
 fn default_metrics(family: SharedString, font_size: f32) -> Metrics {
@@ -68,6 +95,8 @@ pub struct TerminalApp {
     zoomed: Option<PaneId>,
     cursor_on: bool,
     title: String,
+    tab_titles: HashMap<u64, String>,
+    palette: Option<Palette>,
     _wake: Option<Task<()>>,
     _blink: Option<Task<()>>,
     _bounds: Option<Subscription>,
@@ -102,6 +131,8 @@ impl TerminalApp {
             zoomed: None,
             cursor_on: true,
             title: String::new(),
+            tab_titles: HashMap::new(),
+            palette: None,
             _wake: None,
             _blink: None,
             _bounds: None,
@@ -169,10 +200,8 @@ impl TerminalApp {
     }
 
     fn drain(&mut self) {
-        let Some(mux) = &mut self.mux else { return };
-        let events = mux.poll();
-        if events.is_empty() {
-            return;
+        if let Some(mux) = &mut self.mux {
+            let _ = mux.poll();
         }
     }
 
@@ -263,6 +292,10 @@ impl TerminalApp {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = ev.keystroke.clone();
+        if self.palette.is_some() {
+            self.palette_key(&ks, window, cx);
+            return;
+        }
         if let Some(action) = keys::app_action(&ks) {
             self.run_action(action, window, cx);
             return;
@@ -275,23 +308,17 @@ impl TerminalApp {
         let plain = !mods.control && !mods.alt && !mods.platform;
 
         // Suggestion acceptance happens before the key reaches the shell.
-        if self.suggestion.is_some() && plain && ks.key == "right" {
-            if self.accept_suggestion(pane, false) {
-                cx.notify();
-                return;
-            }
+        if plain && ks.key == "right" && self.accept_suggestion(pane, false) {
+            cx.notify();
+            return;
         }
-        if self.suggestion.is_some() && mods.control && ks.key == "right" {
-            if self.accept_suggestion(pane, true) {
-                cx.notify();
-                return;
-            }
+        if mods.control && ks.key == "right" && self.accept_suggestion(pane, true) {
+            cx.notify();
+            return;
         }
-        if self.suggestion.is_some() && mods.control && ks.key == "space" {
-            if self.accept_suggestion(pane, false) {
-                cx.notify();
-                return;
-            }
+        if mods.control && ks.key == "space" && self.accept_suggestion(pane, false) {
+            cx.notify();
+            return;
         }
         if ks.key == "escape" && !mods.control && !mods.alt {
             self.input.dismiss();
@@ -437,6 +464,8 @@ impl TerminalApp {
                     .as_ref()
                     .and_then(|tab| self.neighbour_pane(tab, dir));
                 if let (Some(target), Some(mux)) = (target, &mut self.mux) {
+                    self.input.invalidate();
+                    self.suggestion = None;
                     mux.focus_pane(target);
                 }
             }
@@ -497,7 +526,14 @@ impl TerminalApp {
                 self.measure(window, cx);
             }
             Action::Quit => cx.quit(),
-            Action::Palette | Action::Search | Action::RenameTab | Action::OpenConfig => {}
+            Action::Palette => self.open_palette(PaletteMode::Commands, cx),
+            Action::Search => self.open_palette(PaletteMode::Search, cx),
+            Action::RenameTab => self.open_palette(PaletteMode::Rename, cx),
+            Action::OpenConfig => {
+                if let Some(path) = Config::path() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(path.display().to_string()));
+                }
+            }
         }
         let _ = window;
         cx.notify();
@@ -521,7 +557,7 @@ impl TerminalApp {
                 FocusDir::Up => (py < cy, cy - py),
                 FocusDir::Down => (py > cy, py - cy),
             };
-            if ok && best.map_or(true, |(d, _)| dist < d) {
+            if ok && best.is_none_or(|(d, _)| dist < d) {
                 best = Some((dist, pane.id));
             }
         }
@@ -599,6 +635,10 @@ impl TerminalApp {
     ) {
         self.focus.focus(window);
         if let Some(mux) = &mut self.mux {
+            if mux.snapshot().tabs.iter().any(|tab| tab.active != pane) {
+                self.input.invalidate();
+                self.suggestion = None;
+            }
             mux.focus_pane(pane);
         }
         let Some(pos) = self.pane_cell(pane, ev.position) else {
@@ -676,7 +716,8 @@ impl TerminalApp {
             return None;
         }
         let cursor = term.screen().cursor;
-        Some((cursor.y, cursor.x, suffix.to_string()))
+        let col = (cursor.x + 1).min(term.cols().saturating_sub(1));
+        Some((cursor.y, col, suffix.to_string()))
     }
 
     fn pane_element(
@@ -691,7 +732,19 @@ impl TerminalApp {
             return div().into_any_element();
         };
         let offset = self.offsets.get(&pane).copied().unwrap_or(0);
-        let ghost = self.ghost_for(pane);
+        let is_active = self
+            .mux
+            .as_ref()
+            .and_then(|mux| {
+                let snap = mux.snapshot();
+                snap.tabs.get(snap.active_tab).map(|tab| tab.active == pane)
+            })
+            .unwrap_or(false);
+        let ghost = if is_active {
+            self.ghost_for(pane)
+        } else {
+            None
+        };
         let data = RenderData::build(
             term,
             cols,
@@ -702,6 +755,7 @@ impl TerminalApp {
             &self.metrics,
             self.cursor_on,
             ghost.as_ref().map(|(r, c, t)| (*r, *c, t.as_str())),
+            is_active,
         );
         let visual = terminal::visual(Rc::new(data));
         div()
@@ -736,10 +790,15 @@ impl TerminalApp {
         for (index, tab) in snap.tabs.iter().enumerate() {
             let active = index == snap.active_tab;
             let id = tab.id;
-            let title: SharedString = if tab.title.is_empty() {
+            let raw = self
+                .tab_titles
+                .get(&tab.id)
+                .cloned()
+                .unwrap_or_else(|| tab.title.clone());
+            let title: SharedString = if raw.is_empty() {
                 "shell".into()
             } else {
-                tab.title.clone().into()
+                raw.into()
             };
             let count = tab.panes.len();
             let label = if count > 1 {
@@ -818,7 +877,7 @@ impl TerminalApp {
             .bg(rgb(0x0021_252b))
             .border_b_1()
             .border_color(rgba(0x0000_0000))
-            .child(tabs)
+            .child(div().flex().items_center().child(tabs).child(new_tab))
             .child(
                 div()
                     .text_xs()
@@ -855,7 +914,11 @@ impl TerminalApp {
             return div().size_full().into_any_element();
         };
 
-        let title = tab.title.clone();
+        let title = self
+            .tab_titles
+            .get(&tab.id)
+            .cloned()
+            .unwrap_or_else(|| tab.title.clone());
         if title != self.title {
             self.title = title.clone();
             window.set_window_title(&format!("{title} — Tessera"));
@@ -884,6 +947,18 @@ impl TerminalApp {
             pane_rects.insert(pane, rect);
             area = area.child(self.pane_element(pane, rect, w, h, cx));
         }
+        if let Some(rect) = pane_rects.get(&tab.active).copied() {
+            area = area.child(
+                div()
+                    .absolute()
+                    .left(px(rect.0))
+                    .top(px(rect.1))
+                    .w(px(rect.2))
+                    .h(px(rect.3))
+                    .border_1()
+                    .border_color(self.theme.fg.opacity(0.18)),
+            );
+        }
         self.pane_rects = pane_rects;
 
         let tab_bar = self.tab_bar(&snap, cx);
@@ -906,10 +981,303 @@ impl TerminalApp {
             )
             .into_any_element()
     }
+
+    fn active_tab_id(&self) -> Option<u64> {
+        let mux = self.mux.as_ref()?;
+        let snap = mux.snapshot();
+        snap.tabs.get(snap.active_tab).map(|tab| tab.id)
+    }
+
+    fn active_term(&self) -> Option<&Term> {
+        let pane = self.active_pane()?;
+        self.term(pane)
+    }
+
+    fn open_palette(&mut self, mode: PaletteMode, cx: &mut Context<Self>) {
+        let query = String::new();
+        self.palette = Some(Palette {
+            mode,
+            query,
+            selected: 0,
+            entries: Vec::new(),
+        });
+        self.refresh_palette();
+        cx.notify();
+    }
+
+    fn refresh_palette(&mut self) {
+        let Some(palette) = &self.palette else { return };
+        let query = palette.query.clone();
+        let mode = palette.mode;
+        let entries = match mode {
+            PaletteMode::Commands => command_entries(&query),
+            PaletteMode::Search => self.search_entries(&query),
+            PaletteMode::Rename => Vec::new(),
+        };
+        if let Some(palette) = &mut self.palette {
+            palette.entries = entries;
+            palette.selected = palette
+                .selected
+                .min(palette.entries.len().saturating_sub(1));
+        }
+    }
+
+    fn search_entries(&self, query: &str) -> Vec<PaletteEntry> {
+        let Some(term) = self.active_term() else {
+            return Vec::new();
+        };
+        let needle = query.trim().to_lowercase();
+        let total = term.history_len() + term.rows();
+        let mut out = Vec::new();
+        if needle.is_empty() {
+            return out;
+        }
+        for line in (0..total).rev() {
+            let Some(row) = term.line(line) else { continue };
+            let text = row.text();
+            if text.trim().is_empty() {
+                continue;
+            }
+            if text.to_lowercase().contains(&needle) {
+                let shown = text.trim();
+                let label = if shown.chars().count() > 100 {
+                    let truncated: String = shown.chars().take(100).collect();
+                    format!("{truncated}…")
+                } else {
+                    shown.to_string()
+                };
+                out.push(PaletteEntry {
+                    label,
+                    detail: format!("line {}", line + 1),
+                    kind: EntryKind::Jump(line),
+                });
+                if out.len() >= 200 {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn palette_key(&mut self, ks: &Keystroke, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = &mut self.palette else {
+            return;
+        };
+        match ks.key.as_str() {
+            "escape" => {
+                self.palette = None;
+                cx.notify();
+                return;
+            }
+            "enter" => {
+                self.palette_commit(window, cx);
+                return;
+            }
+            "up" => {
+                palette.selected = palette.selected.saturating_sub(1);
+            }
+            "down" => {
+                if !palette.entries.is_empty() {
+                    palette.selected = (palette.selected + 1).min(palette.entries.len() - 1);
+                }
+            }
+            "backspace" => {
+                palette.query.pop();
+            }
+            "space" if !ks.modifiers.control && !ks.modifiers.alt => palette.query.push(' '),
+            _ if ks.modifiers.control || ks.modifiers.alt || ks.modifiers.platform => {}
+            _ => {
+                if let Some(text) = ks.key_char.as_deref() {
+                    palette.query.push_str(text);
+                } else if ks.key.chars().count() == 1 {
+                    palette.query.push_str(&ks.key);
+                }
+            }
+        }
+        self.refresh_palette();
+        cx.notify();
+    }
+
+    fn palette_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.take() else {
+            return;
+        };
+        match palette.mode {
+            PaletteMode::Rename => {
+                if let Some(id) = self.active_tab_id() {
+                    if !palette.query.trim().is_empty() {
+                        self.tab_titles.insert(id, palette.query.trim().to_string());
+                    }
+                }
+            }
+            _ => {
+                if let Some(entry) = palette.entries.get(palette.selected).cloned() {
+                    self.execute_entry(entry, window, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn palette_choose(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(palette) = &mut self.palette {
+            palette.selected = index;
+        }
+        self.palette_commit(window, cx);
+    }
+
+    fn execute_entry(&mut self, entry: PaletteEntry, window: &mut Window, cx: &mut Context<Self>) {
+        match entry.kind {
+            EntryKind::Do(action) => self.run_action(action, window, cx),
+            EntryKind::Jump(line) => {
+                if let Some(pane) = self.active_pane() {
+                    if let Some(term) = self.term(pane) {
+                        let history = term.history_len();
+                        let offset = history.saturating_sub(line);
+                        self.offsets.insert(pane, offset);
+                    }
+                }
+            }
+        }
+    }
+
+    fn palette_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(palette) = &self.palette else {
+            return div().into_any_element();
+        };
+        let mode = palette.mode;
+        let query = palette.query.clone();
+        let selected = palette.selected;
+        let entries: Vec<PaletteEntry> = palette.entries.iter().take(9).cloned().collect();
+        let prompt = match mode {
+            PaletteMode::Commands => "Command",
+            PaletteMode::Search => "Search scrollback",
+            PaletteMode::Rename => "Rename tab",
+        };
+
+        let mut list = div().flex().flex_col().gap_1().p_2();
+        if matches!(mode, PaletteMode::Rename) {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(self.theme.fg.opacity(0.5))
+                    .child("Enter to rename, Esc to cancel"),
+            );
+        } else if entries.is_empty() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_sm()
+                    .text_color(self.theme.fg.opacity(0.45))
+                    .child(if query.is_empty() {
+                        "Type to filter…"
+                    } else {
+                        "No matches"
+                    }),
+            );
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            let active = index == selected;
+            let label = entry.label.clone();
+            let detail = entry.detail.clone();
+            let row = div()
+                .id(ElementId::Name(format!("palette-{index}").into()))
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(30.0))
+                .px_2()
+                .rounded_sm()
+                .text_sm()
+                .when(active, |this| this.bg(self.theme.selection))
+                .text_color(self.theme.fg)
+                .hover(|style| style.bg(self.theme.selection.opacity(0.7)))
+                .on_click(
+                    cx.listener(move |this, _ev: &gpui::ClickEvent, window, cx| {
+                        this.palette_choose(index, window, cx);
+                    }),
+                )
+                .child(label)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(self.theme.fg.opacity(0.45))
+                        .child(detail),
+                );
+            list = list.child(row);
+        }
+
+        let panel = div()
+            .w(px(600.0))
+            .max_h(px(420.0))
+            .flex()
+            .flex_col()
+            .rounded_md()
+            .border_1()
+            .border_color(self.theme.selection)
+            .bg(rgb(0x0021_252b))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _ev: &MouseDownEvent, _w, cx| cx.stop_propagation()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(self.theme.selection.opacity(0.6))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(self.theme.fg.opacity(0.45))
+                            .child(prompt),
+                    )
+                    .child(div().flex_1().text_sm().text_color(self.theme.fg).child(
+                        if query.is_empty() {
+                            "▌".to_string()
+                        } else {
+                            format!("{query}▌")
+                        },
+                    )),
+            )
+            .child(list);
+
+        div()
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .w_full()
+            .h_full()
+            .flex()
+            .justify_center()
+            .items_start()
+            .pt(px(72.0))
+            .bg(rgba(0x0000_00cc))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev: &MouseDownEvent, _w, cx| {
+                    this.palette = None;
+                    cx.notify();
+                }),
+            )
+            .child(panel)
+            .into_any_element()
+    }
 }
 
 impl Render for TerminalApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let overlay = if self.palette.is_some() {
+            Some(self.palette_overlay(cx))
+        } else {
+            None
+        };
         div()
             .size_full()
             .track_focus(&self.focus)
@@ -922,6 +1290,7 @@ impl Render for TerminalApp {
             )
             .bg(self.theme.bg)
             .child(self.body(window, cx))
+            .children(overlay)
     }
 }
 
@@ -1005,4 +1374,63 @@ fn spawn_mux(config: &Config, cols: usize, rows: usize) -> Result<Box<dyn Mux>, 
         }
     }
     native()
+}
+
+fn fuzzy(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let mut chars = haystack.chars();
+    needle
+        .chars()
+        .all(|want| chars.any(|have| have.eq_ignore_ascii_case(&want)))
+}
+
+fn command_entries(query: &str) -> Vec<PaletteEntry> {
+    use Action::*;
+    let mut commands: Vec<(&str, &str, Action)> = vec![
+        ("New tab", "Ctrl+Shift+T", NewTab),
+        ("Close pane", "Ctrl+Shift+W", ClosePane),
+        ("Next tab", "Ctrl+Tab", NextTab),
+        ("Previous tab", "Ctrl+Shift+Tab", PrevTab),
+        ("Split right", "Ctrl+Shift+E", SplitRight),
+        ("Split down", "Ctrl+Shift+O", SplitDown),
+        ("Zoom pane", "Ctrl+Shift+Z", ZoomPane),
+        (
+            "Focus pane left",
+            "Ctrl+Shift+Left",
+            FocusPane(FocusDir::Left),
+        ),
+        (
+            "Focus pane right",
+            "Ctrl+Shift+Right",
+            FocusPane(FocusDir::Right),
+        ),
+        ("Focus pane up", "Ctrl+Shift+Up", FocusPane(FocusDir::Up)),
+        (
+            "Focus pane down",
+            "Ctrl+Shift+Down",
+            FocusPane(FocusDir::Down),
+        ),
+        ("Copy selection", "Ctrl+Shift+C", Copy),
+        ("Paste", "Ctrl+Shift+V", Paste),
+        ("Select all", "Ctrl+Shift+A", SelectAll),
+        ("Search scrollback", "Ctrl+Shift+F", Search),
+        ("Clear screen", "Ctrl+Shift+K", ClearScrollback),
+        ("Rename tab", "F2", RenameTab),
+        ("Font bigger", "Ctrl+Shift+=", FontIncrease),
+        ("Font smaller", "Ctrl+Shift+-", FontDecrease),
+        ("Font reset", "Ctrl+Shift+0", FontReset),
+        ("Copy config path", "Ctrl+,", OpenConfig),
+        ("Quit", "Ctrl+Shift+Q", Quit),
+    ];
+    commands.retain(|(label, _, _)| fuzzy(label, query));
+    commands
+        .into_iter()
+        .map(|(label, chord, action)| PaletteEntry {
+            label: label.to_string(),
+            detail: chord.to_string(),
+            kind: EntryKind::Do(action),
+        })
+        .collect()
 }

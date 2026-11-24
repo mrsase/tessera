@@ -13,7 +13,6 @@ pub struct Theme {
     pub bg: Hsla,
     pub cursor: Hsla,
     pub selection: Hsla,
-    pub palette: [Hsla; 16],
     /// Pre-resolved 256-colour table (ANSI 16 + 6x6x6 cube + greys).
     table: [Hsla; 256],
 }
@@ -26,24 +25,23 @@ impl Theme {
         }
         let mut table = [hsla(0); 256];
         table[..16].copy_from_slice(&palette);
-        for i in 16..232 {
-            let n = i - 16;
-            let levels = [0u8, 95, 135, 175, 215, 255];
+        let levels = [0u8, 95, 135, 175, 215, 255];
+        for (n, slot) in table.iter_mut().enumerate().skip(16).take(216) {
+            let n = n - 16;
             let r = levels[n / 36];
             let g = levels[(n / 6) % 6];
             let b = levels[n % 6];
-            table[i] = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32).into();
+            *slot = rgb(((r as u32) << 16) | ((g as u32) << 8) | b as u32).into();
         }
-        for i in 232..256 {
+        for (i, slot) in table.iter_mut().enumerate().skip(232) {
             let v = (8 + 10 * (i - 232)) as u32;
-            table[i] = rgb((v << 16) | (v << 8) | v).into();
+            *slot = rgb((v << 16) | (v << 8) | v).into();
         }
         Self {
             fg: parse_hex(&theme.foreground).unwrap_or_else(|| hsla(0x00ab_b2bf)),
             bg: parse_hex(&theme.background).unwrap_or_else(|| hsla(0x0028_2c34)),
             cursor: parse_hex(&theme.cursor).unwrap_or_else(|| hsla(0x00ab_b2bf)),
             selection: parse_hex(&theme.selection).unwrap_or_else(|| hsla(0x003e_4451)),
-            palette,
             table,
         }
     }
